@@ -59,14 +59,6 @@ fn histogram(vals: &[u64], min: u64, interval: u64, output: &mut [usize]) {
 ```
 
 */
-#![no_std]
-
-#[cfg(feature = "std")]
-extern crate std;
-
-#[cfg(test)]
-#[macro_use]
-extern crate std;
 
 // ported from  libdivide.h by ridiculous_fish
 //
@@ -83,19 +75,39 @@ pub enum DividerU64 {
 }
 
 #[inline(always)]
-fn libdivide_mullhi_u64(x: u64, y: u64) -> u64 {
+const fn libdivide_mullhi_u64(x: u64, y: u64) -> u64 {
     let xl = x as u128;
     let yl = y as u128;
     ((xl * yl) >> 64) as u64
 }
 
 #[inline(always)]
-fn is_power_of_2(n: u64) -> bool {
+const fn is_power_of_2(n: u64) -> bool {
     n & (n - 1) == 0
 }
 
+pub const fn make_divider_array<const T: usize>() -> [DividerU64; T] {
+    use std::mem::MaybeUninit;
+
+    let mut arr: [DividerU64; T] = unsafe { MaybeUninit::uninit().assume_init() };
+    arr[0] = DividerU64::divide_by(1);
+
+    let mut i = 1;
+
+    loop {
+        if i >= T {
+            break;
+        }
+
+        arr[i] = DividerU64::divide_by(i as u64);
+        i += 1;
+    }
+
+    arr
+}
+
 impl DividerU64 {
-    fn power_of_2_division(divisor: u64) -> Option<DividerU64> {
+    const fn power_of_2_division(divisor: u64) -> Option<DividerU64> {
         let floor_log_2_d: u8 = 63u8 - (divisor.leading_zeros() as u8);
         if is_power_of_2(divisor) {
             // Divisor is a power of 2.
@@ -105,15 +117,20 @@ impl DividerU64 {
         None
     }
 
-    fn fast_path(divisor: u64) -> Option<DividerU64> {
+    const fn fast_path(divisor: u64) -> Option<DividerU64> {
         if is_power_of_2(divisor) {
             return None;
         }
+
+        if divisor == 0 {
+            unsafe { core::hint::unreachable_unchecked() }
+        }
+
         let floor_log_2_d: u8 = 63u8 - (divisor.leading_zeros() as u8);
         let u = 1u128 << (floor_log_2_d + 64);
         let proposed_magic_number: u128 = u / divisor as u128;
         let reminder: u64 = (u - proposed_magic_number * (divisor as u128)) as u64;
-        assert!(reminder > 0 && reminder < divisor);
+        debug_assert!(reminder > 0 && reminder < divisor);
         let e: u64 = divisor - reminder;
         // This is a sufficient condition for our 64-bits magic number
         // condition to work as described in
@@ -127,8 +144,13 @@ impl DividerU64 {
         })
     }
 
-    fn general_path(divisor: u64) -> DividerU64 {
-        assert!(!is_power_of_2(divisor));
+    const fn general_path(divisor: u64) -> DividerU64 {
+        debug_assert!(!is_power_of_2(divisor));
+
+        if divisor == 0 {
+            unsafe { core::hint::unreachable_unchecked() }
+        }
+
         // p=⌈log2d⌉
         let p: u8 = 64u8 - (divisor.leading_zeros() as u8);
         // m=⌈2^{64+p} / d⌉. This is a 33 bit number, so keep only the low 32 bits.
@@ -141,15 +163,23 @@ impl DividerU64 {
         }
     }
 
-    pub fn divide_by(divisor: u64) -> DividerU64 {
-        assert!(divisor > 0u64);
-        Self::power_of_2_division(divisor)
-            .or_else(|| DividerU64::fast_path(divisor))
-            .unwrap_or_else(|| DividerU64::general_path(divisor))
+    #[inline]
+    pub const fn divide_by(divisor: u64) -> DividerU64 {
+        debug_assert!(divisor > 0u64);
+
+        if let Some(res) = Self::power_of_2_division(divisor) {
+            return res;
+        }
+
+        if let Some(res) = DividerU64::fast_path(divisor) {
+            return res;
+        }
+
+        DividerU64::general_path(divisor)
     }
 
     #[inline(always)]
-    pub fn divide(&self, n: u64) -> u64 {
+    pub const fn divide(&self, n: u64) -> u64 {
         match *self {
             DividerU64::BitShift(d) => n >> d,
             DividerU64::Fast { magic, shift } => {
@@ -195,6 +225,20 @@ mod tests {
                 shift: 3
             }
         );
+    }
+
+    #[test]
+    fn test_const_array() {
+        use crate::make_divider_array;
+
+        const CONST_ARRAY: [DividerU64; 1024] = make_divider_array::<1024>();
+
+        for i in 1..1024 {
+            for y in 0..5_000 {
+                let testing = CONST_ARRAY[i];
+                assert_eq!(testing.divide(y), y / i as u64);
+            }
+        }
     }
 
     proptest! {
